@@ -397,6 +397,25 @@ Run the Clad tests:
 make -j8 check-clad
 ```
 
+### Building Clad as part of another CMake project
+
+A project that already looks for LLVM and Clang itself can compile clad along
+with its own sources instead of driving a separate clad build. Add clad as a
+subdirectory after `find_package(LLVM)`, `find_package(Clang)` and
+`include(AddLLVM)`, and announce that its LLVM is yours:
+
+```cmake
+set(CLAD_BUILT_AS_SUBPROJECT ON)
+set(CLAD_BUILD_STATIC_ONLY ON) # unless you want clad.so and clad's test suite
+add_subdirectory(/path/to/clad clad)
+```
+
+Clad then skips its own `find_package` calls and takes `LLVM_INCLUDE_DIRS`,
+`CLANG_INCLUDE_DIRS`, `LLVM_VERSION_MAJOR` and the LLVM CMake helpers from the
+host project, so both are built from one configuration with one set of compiler
+flags. Clad installs nothing in this mode -- the headers to ship, and where they
+go, are the host's decision. ROOT builds clad this way with `-Dclad_in_tree=ON`.
+
 ## Further reading
 
 ### What can be differentiated

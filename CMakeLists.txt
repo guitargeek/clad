@@ -208,6 +208,33 @@ if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
   set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib/)
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/)
 
+elseif(CLAD_BUILT_AS_SUBPROJECT)
+  # Clad is embedded into a host project (eg. ROOT) which has already located
+  # LLVM and Clang and set up the LLVM CMake modules. Reuse that configuration
+  # instead of running our own find_package: the host and clad then share a
+  # single set of compiler flags, and clad's sources take part in the host's
+  # incremental builds.
+  message(STATUS "Building Clad as a subproject of ${CMAKE_PROJECT_NAME}")
+
+  foreach(_clad_required_var LLVM_INCLUDE_DIRS CLANG_INCLUDE_DIRS
+                             LLVM_VERSION_MAJOR LLVM_CMAKE_DIR)
+    if (NOT ${_clad_required_var})
+      message(FATAL_ERROR "CLAD_BUILT_AS_SUBPROJECT is set, but ${_clad_required_var} "
+        "is empty. The host project has to find LLVM and Clang before adding clad.")
+    endif()
+  endforeach()
+
+  if (NOT COMMAND llvm_add_library)
+    message(FATAL_ERROR "CLAD_BUILT_AS_SUBPROJECT is set, but the LLVM CMake modules "
+      "are not available. The host project has to include(AddLLVM) before adding clad.")
+  endif()
+
+  if (LLVM_VERSION_MAJOR VERSION_LESS LLVM_MIN_SUPPORTED OR
+      LLVM_VERSION_MAJOR VERSION_GREATER_EQUAL LLVM_VERSION_UPPER_BOUND)
+    message(WARNING "Building against unsupported version: LLVM ${LLVM_VERSION_MAJOR};\n"
+      " Supported versions are from ${LLVM_MIN_SUPPORTED} to ${LLVM_MAX_SUPPORTED}.")
+  endif()
+
 else()
   # Not standalone; we are building within llvm
   if (NOT "clang" IN_LIST LLVM_ENABLE_PROJECTS)
@@ -267,7 +294,9 @@ if (APPLE)
 endif ()
 
 # FIXME: Use merge this with the content from the LLVMConfig and ClangConfig.
-if (NOT CLAD_BUILT_STANDALONE)
+# When built as a subproject the clang headers do not sit next to us, the host
+# project told us where they are through CLANG_INCLUDE_DIRS.
+if (NOT CLAD_BUILT_STANDALONE AND NOT CLAD_BUILT_AS_SUBPROJECT)
 include_directories(BEFORE SYSTEM
   ${CMAKE_CURRENT_BINARY_DIR}/../clang/include
   ${CMAKE_CURRENT_SOURCE_DIR}/../clang/include
@@ -279,30 +308,34 @@ include_directories(BEFORE SYSTEM
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   )
 
-install(DIRECTORY include/
-  DESTINATION include
-  FILES_MATCHING
-  PATTERN "*.def"
-  PATTERN "*.h"
-  PATTERN ".svn" EXCLUDE
+# A host project embedding clad has its own installation layout, so it is the
+# one deciding where our headers go.
+if (NOT CLAD_BUILT_AS_SUBPROJECT)
+  install(DIRECTORY include/
+    DESTINATION include
+    FILES_MATCHING
+    PATTERN "*.def"
+    PATTERN "*.h"
+    PATTERN ".svn" EXCLUDE
+    )
+
+  install(DIRECTORY tools/
+    DESTINATION include/clad/tools
+    FILES_MATCHING
+    PATTERN "*.h"
   )
 
-install(DIRECTORY tools/
-  DESTINATION include/clad/tools
-  FILES_MATCHING
-  PATTERN "*.h"
-)
+  install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/include/
+    DESTINATION include
+    FILES_MATCHING
+    PATTERN "CMakeFiles" EXCLUDE
+    PATTERN "*.inc"
+    )
 
-install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/include/
-  DESTINATION include
-  FILES_MATCHING
-  PATTERN "CMakeFiles" EXCLUDE
-  PATTERN "*.inc"
-  )
-
-install(FILES cmake/modules/AddClad.cmake
-  DESTINATION lib/cmake/clad
-  )
+  install(FILES cmake/modules/AddClad.cmake
+    DESTINATION lib/cmake/clad
+    )
+endif()
 
 add_definitions( -D_GNU_SOURCE
   -DCLAD_SRCDIR_INCL="${CLAD_SOURCE_DIR}/include"

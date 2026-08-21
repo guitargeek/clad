@@ -49,6 +49,24 @@ using OwnedAnalysisContexts =
     llvm::SmallVector<std::unique_ptr<clang::AnalysisDeclContext>, 4>;
 using ParamSet = std::set<const clang::ParmVarDecl*>;
 using ParamInfo = std::map<const clang::FunctionDecl*, ParamSet>;
+
+/// What the planner knows about one `#pragma clad checkpoint loop`.
+struct LoopCheckpointInfo {
+  /// Location of the attached loop; invalid if the pragma precedes no loop.
+  clang::SourceLocation LoopLoc;
+  /// Variables declared outside the loop that its body writes. The reverse
+  /// sweep cannot recompute their per-iteration values from the loop counter
+  /// alone; when it has to replay iterations, these are saved at loop entry
+  /// and restored before each replay.
+  llvm::SmallVector<const clang::VarDecl*, 4> CarriedVars;
+  /// True if the reverse sweep reads the value of some carried variable, so
+  /// each reverse iteration must replay all preceding iterations from the
+  /// loop-entry state.
+  bool NeedsReplay = false;
+  /// Why the loop cannot be checkpointed, or null if it can. An unsupported
+  /// loop falls back to storing values on tapes.
+  const char* Unsupported = nullptr;
+};
 /// A read-only, AD-oriented view over the primal being differentiated: it
 /// wraps the primal FunctionDecl and surfaces the AD-relevant facts the
 /// FunctionDecl itself does not. Recording such facts here, rather than
@@ -260,10 +278,10 @@ public:
   /// differentiated, for example, when we are computing higher
   /// order derivatives.
   const clang::CXXRecordDecl* Functor = nullptr;
-  /// Stores loop checkpoint pragma locations and attached loop locations.
-  /// Key: pragma location; value: attached loop location, if any.
-  /// The key order is reversed to simplify location range lookups.
-  mutable std::map<clang::SourceLocation, clang::SourceLocation, std::greater<>>
+  /// Stores loop checkpoint pragma locations and what is known about the
+  /// attached loops. Key: pragma location. The key order is reversed to
+  /// simplify location range lookups.
+  mutable std::map<clang::SourceLocation, LoopCheckpointInfo, std::greater<>>
       m_CladLoopCheckpoints;
 
   /// Global VarDecl to differentiate, if any.

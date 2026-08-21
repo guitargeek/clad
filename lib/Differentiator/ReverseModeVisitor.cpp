@@ -1289,7 +1289,8 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     const Stmt* body = FS->getBody();
     StmtDiff BodyDiff = DifferentiateLoopBody(
         body, loopCounter, condVarRes.getStmt_dx(), incDiff.getStmt_dx(),
-        /*isForLoop=*/true, FS->getForLoc());
+        /*isForLoop=*/true, FS->getForLoc(), initResult.getStmt(),
+        incDiff.getExpr());
 
     /// FIXME: This part in necessary to replace local variables inside loops
     /// with function globals and replace initializations with assignments.
@@ -4936,33 +4937,63 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     return inner;
   }
 
-  static bool hasCheckpointingPragma(ASTContext& C, SourceLocation loopLoc,
-                                     const DiffRequest& request) {
+  static const LoopCheckpointInfo*
+  getCheckpointingPragma(ASTContext& C, SourceLocation loopLoc,
+                         const DiffRequest& request) {
     if (!loopLoc.isValid())
-      return false;
+      return nullptr;
 
     clang::SourceManager& SM = C.getSourceManager();
     SourceLocation expandedLoopLoc = SM.getExpansionLoc(loopLoc);
     for (const auto& entry : request.m_CladLoopCheckpoints) {
-      if (!entry.second.isValid())
+      if (!entry.second.LoopLoc.isValid())
         continue;
-      if (SM.getExpansionLoc(entry.second) == expandedLoopLoc)
-        return true;
+      if (SM.getExpansionLoc(entry.second.LoopLoc) == expandedLoopLoc)
+        return &entry.second;
     }
-    return false;
+    return nullptr;
   }
 
   StmtDiff ReverseModeVisitor::DifferentiateLoopBody(
       const Stmt* body, LoopCounter& loopCounter, Stmt* condVarDiff,
-      Stmt* forLoopIncDiff, bool isForLoop, SourceLocation loopLoc) {
+      Stmt* forLoopIncDiff, bool isForLoop, SourceLocation loopLoc,
+      Stmt* forLoopInitFwd, Expr* forLoopIncFwd) {
     // If the user marked this loop with a checkpointing pragma,
     // we should avoid using tapes inside it in favor of recomputations.
     llvm::SaveAndRestore<bool> Saved(isInsideLoop);
     llvm::SaveAndRestore<bool> SavedCP(m_IsInsideCheckpointedLoop);
     if (!loopLoc.isValid())
       loopLoc = body->getBeginLoc();
-    bool shouldCheckpoint =
-        hasCheckpointingPragma(m_Context, loopLoc, m_DiffReq);
+    const LoopCheckpointInfo* ckptInfo =
+        getCheckpointingPragma(m_Context, loopLoc, m_DiffReq);
+    bool shouldCheckpoint = ckptInfo && !ckptInfo->Unsupported;
+    // When the reverse sweep needs the value of a variable the loop carries
+    // across iterations (the planner sets NeedsReplay), recomputing iteration
+    // i requires the state at its start. Save that state at loop entry;
+    // each reverse iteration restores it and replays iterations 0..i-1.
+    llvm::SmallVector<std::pair<VarDecl*, VarDecl*>, 4> ckptVars;
+    if (shouldCheckpoint && ckptInfo->NeedsReplay) {
+      for (const VarDecl* origVD : ckptInfo->CarriedVars) {
+        auto it = m_DeclReplacements.find(origVD);
+        if (it == m_DeclReplacements.end()) {
+          // Cannot resolve the carried variable in the derivative (e.g. when
+          // differentiating a generated function); fall back to tapes.
+          shouldCheckpoint = false;
+          ckptVars.clear();
+          break;
+        }
+        ckptVars.emplace_back(it->second, nullptr);
+      }
+      for (auto& [loopVD, saveVD] : ckptVars) {
+        saveVD = BuildGlobalVarDecl(
+            loopVD->getType().getNonReferenceType().getUnqualifiedType(),
+            "_ckpt_" + loopVD->getNameAsString());
+        addToBlock(BuildDeclStmt(saveVD), m_Globals);
+        addToCurrentBlock(BuildOp(BinaryOperatorKind::BO_Assign,
+                                  BuildDeclRef(saveVD), BuildDeclRef(loopVD)),
+                          direction::forward);
+      }
+    }
     if (shouldCheckpoint) {
       isInsideLoop = false;
       m_IsInsideCheckpointedLoop = true;
@@ -5018,6 +5049,45 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
            llvm::reverse(cast<CompoundStmt>(bodyDiff.getStmt())->body()))
         bodyDiff.updateStmtDx(utils::PrependAndCreateCompoundStmt(
             m_Context, bodyDiff.getStmt_dx(), CloneNode(S)));
+      if (!ckptVars.empty()) {
+        // The repeated statements above recompute iteration i correctly only
+        // from the state at its start. Rebuild that state first: restore the
+        // loop-entry values saved before the loop and replay the preceding
+        // iterations. The counter still holds i + 1 here: every reverse loop
+        // decrements it at the end of the iteration.
+        Stmts replay;
+        for (auto& [loopVD, saveVD] : ckptVars)
+          replay.push_back(BuildOp(BinaryOperatorKind::BO_Assign,
+                                   BuildDeclRef(loopVD), BuildDeclRef(saveVD)));
+        if (forLoopInitFwd)
+          replay.push_back(CloneNode(forLoopInitFwd));
+        QualType counterTy = clad_compat::getSizeType(m_Context);
+        Expr* numReplayIters =
+            BuildOp(BinaryOperatorKind::BO_Sub, loopCounter.cloneRef(),
+                    ConstantFolder::synthesizeLiteral(counterTy, m_Context,
+                                                      /*val=*/1));
+        VarDecl* replayCounter = BuildVarDecl(counterTy, "_r", numReplayIters);
+        Stmts replayBody;
+        for (Stmt* S : cast<CompoundStmt>(bodyDiff.getStmt())->body())
+          replayBody.push_back(CloneNode(S));
+        if (forLoopIncFwd)
+          replayBody.push_back(CloneNode(forLoopIncFwd));
+        Expr* replayCond = m_Sema
+                               .ActOnCondition(getCurrentScope(), noLoc,
+                                               BuildDeclRef(replayCounter),
+                                               Sema::ConditionKind::Boolean)
+                               .get()
+                               .second;
+        Expr* replayDec =
+            BuildOp(UnaryOperatorKind::UO_PostDec, BuildDeclRef(replayCounter));
+        Stmt* replayFor = new (m_Context)
+            ForStmt(m_Context, BuildDeclStmt(replayCounter), replayCond,
+                    /*CondVar=*/nullptr, replayDec,
+                    MakeCompoundStmt(replayBody), noLoc, noLoc, noLoc);
+        replay.push_back(replayFor);
+        bodyDiff.updateStmtDx(utils::PrependAndCreateCompoundStmt(
+            m_Context, bodyDiff.getStmt_dx(), MakeCompoundStmt(replay)));
+      }
     }
     // Increment statement in the for-loop is executed for every case
     if (forLoopIncDiff) {

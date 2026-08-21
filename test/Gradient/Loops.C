@@ -2897,6 +2897,124 @@ double fn46(double x, double y) {
 // CHECK-NEXT:         }
 // CHECK-NEXT: }
 
+double fn47(double x, double y) {
+  // The loop carries `t` across iterations and the pullback of the
+  // assignment needs its old value, so each reverse iteration replays the
+  // preceding ones from the state saved at loop entry.
+  double t = y;
+  #pragma clad checkpoint loop
+  for (int i = 0; i < 3; ++i)
+    t = x * t + i;
+  return t; // x^3 y + x + 2  -->  (3 x^2 y + 1, x^3)
+}
+
+// CHECK: void fn47_grad(double x, double y, double *_d_x, double *_d_y) {
+// CHECK-NEXT:     int _d_i = 0;
+// CHECK-NEXT:     int i = 0;
+// CHECK-NEXT:     double _ckpt_t0;
+// CHECK-NEXT:     double _t1;
+// CHECK-NEXT:     double _d_t = 0.;
+// CHECK-NEXT:     double t = y;
+// CHECK-NEXT:     unsigned {{int|long|long long}} _t0 = 0;
+// CHECK-NEXT:     _ckpt_t0 = t;
+// CHECK-NEXT:     for (i = 0; i < 3; ++i) {
+// CHECK-NEXT:         _t0++;
+// CHECK-NEXT:         _t1 = t;
+// CHECK-NEXT:         t = x * t + i;
+// CHECK-NEXT:     }
+// CHECK-NEXT:     _d_t += 1;
+// CHECK-NEXT:     for (; _t0; _t0--) {
+// CHECK-NEXT:         {
+// CHECK-NEXT:             t = _ckpt_t0;
+// CHECK-NEXT:             i = 0;
+// CHECK-NEXT:             for (unsigned {{int|long|long long}} _r0 = _t0 - {{1U|1UL|1ULL}}; _r0; _r0--) {
+// CHECK-NEXT:                 _t1 = t;
+// CHECK-NEXT:                 t = x * t + i;
+// CHECK-NEXT:                 ++i;
+// CHECK-NEXT:             }
+// CHECK-NEXT:         }
+// CHECK-NEXT:         _t1 = t;
+// CHECK-NEXT:         t = x * t + i;
+// CHECK-NEXT:         t = _t1;
+// CHECK-NEXT:         double _r_d0 = _d_t;
+// CHECK-NEXT:         _d_t = 0.;
+// CHECK-NEXT:         *_d_x += _r_d0 * t;
+// CHECK-NEXT:         _d_t += x * _r_d0;
+// CHECK-NEXT:         _d_i += _r_d0;
+// CHECK-NEXT:     }
+// CHECK-NEXT:     *_d_y += _d_t;
+// CHECK-NEXT: }
+
+double fn48(double x, double y) {
+  double w[3] = {x, y, x * y};
+  double s = 1;
+  unsigned int i = 0;
+  // Both `s` and `i` are carried: the pullbacks need the old `s` (the
+  // operator is `*=`) and the per-iteration `i` (it indexes `w`), so the
+  // replay has to restore both.
+  #pragma clad checkpoint loop
+  while (i < 3) {
+    s *= w[i];
+    ++i;
+  }
+  return s; // x^2 y^2  -->  (2 x y^2, 2 x^2 y)
+}
+
+// CHECK: void fn48_grad(double x, double y, double *_d_x, double *_d_y) {
+// CHECK-NEXT:     double _ckpt_s0;
+// CHECK-NEXT:     unsigned int _ckpt_i0;
+// CHECK-NEXT:     double _t1;
+// CHECK-NEXT:     double _d_w[3] = {0};
+// CHECK-NEXT:     double w[3] = {x, y, x * y};
+// CHECK-NEXT:     double _d_s = 0.;
+// CHECK-NEXT:     double s = 1;
+// CHECK-NEXT:     unsigned int _d_i = 0U;
+// CHECK-NEXT:     unsigned int i = 0;
+// CHECK-NEXT:     unsigned {{int|long|long long}} _t0 = 0;
+// CHECK-NEXT:     _ckpt_s0 = s;
+// CHECK-NEXT:     _ckpt_i0 = i;
+// CHECK-NEXT:     while (i < 3)
+// CHECK-NEXT:         {
+// CHECK-NEXT:             _t0++;
+// CHECK-NEXT:             _t1 = s;
+// CHECK-NEXT:             s *= w[i];
+// CHECK-NEXT:             ++i;
+// CHECK-NEXT:         }
+// CHECK-NEXT:     _d_s += 1;
+// CHECK-NEXT:     while (_t0)
+// CHECK-NEXT:         {
+// CHECK-NEXT:             {
+// CHECK-NEXT:                 {
+// CHECK-NEXT:                     s = _ckpt_s0;
+// CHECK-NEXT:                     i = _ckpt_i0;
+// CHECK-NEXT:                     for (unsigned {{int|long|long long}} _r0 = _t0 - {{1U|1UL|1ULL}}; _r0; _r0--) {
+// CHECK-NEXT:                         _t1 = s;
+// CHECK-NEXT:                         s *= w[i];
+// CHECK-NEXT:                         ++i;
+// CHECK-NEXT:                     }
+// CHECK-NEXT:                 }
+// CHECK-NEXT:                 _t1 = s;
+// CHECK-NEXT:                 s *= w[i];
+// CHECK-NEXT:                 ++i;
+// CHECK-NEXT:                 --i;
+// CHECK-NEXT:                 {
+// CHECK-NEXT:                     s = _t1;
+// CHECK-NEXT:                     double _r_d0 = _d_s;
+// CHECK-NEXT:                     _d_s = 0.;
+// CHECK-NEXT:                     _d_s += _r_d0 * w[i];
+// CHECK-NEXT:                     _d_w[i] += s * _r_d0;
+// CHECK-NEXT:                 }
+// CHECK-NEXT:             }
+// CHECK-NEXT:             _t0--;
+// CHECK-NEXT:         }
+// CHECK-NEXT:     {
+// CHECK-NEXT:         *_d_x += _d_w[0];
+// CHECK-NEXT:         *_d_y += _d_w[1];
+// CHECK-NEXT:         *_d_x += _d_w[2] * y;
+// CHECK-NEXT:         *_d_y += x * _d_w[2];
+// CHECK-NEXT:     }
+// CHECK-NEXT: }
+
 #define TEST(F, x) { \
   result[0] = 0; \
   auto F##grad = clad::gradient(F);\
@@ -3006,4 +3124,6 @@ int main() {
   TEST_2(fn44, 2, 3); // CHECK-EXEC: {1.00, 1.00}
   TEST_2(fn45, 1, 0.5); // CHECK-EXEC: {-50.00, 100.00}
   TEST_2(fn46, 1, 0.5); // CHECK-EXEC: {-50.00, 100.00}
+  TEST_2(fn47, 2, 3); // CHECK-EXEC: {37.00, 8.00}
+  TEST_2(fn48, 2, 3); // CHECK-EXEC: {36.00, 24.00}
 }

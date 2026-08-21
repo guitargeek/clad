@@ -719,13 +719,19 @@ namespace clad {
     /// increment statement, if any.
     ///\param[in] isForLoop should be true if we are differentiating a `for`
     /// loop body; otherwise false.
+    ///\param[in] forLoopInitFwd forward-pass statement of the `for` loop init,
+    /// if any. A checkpointed loop clones it to replay iterations.
+    ///\param[in] forLoopIncFwd forward-pass expression of the `for` loop
+    /// increment, if any. A checkpointed loop clones it to replay iterations.
     ///\returns {forward pass statements, reverse pass statements} for the loop
     /// body.
     StmtDiff DifferentiateLoopBody(
         const clang::Stmt* body, LoopCounter& loopCounter,
         clang::Stmt* condVarDifff = nullptr,
         clang::Stmt* forLoopIncDiff = nullptr, bool isForLoop = false,
-        clang::SourceLocation loopLoc = clang::SourceLocation());
+        clang::SourceLocation loopLoc = clang::SourceLocation(),
+        clang::Stmt* forLoopInitFwd = nullptr,
+        clang::Expr* forLoopIncFwd = nullptr);
 
     StmtDiff DifferentiateCanonicalLoop(const clang::ForStmt* S);
 
